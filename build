@@ -37,6 +37,14 @@ if($target eq 'clean') {
 }
 
 if($target eq 'install') {
+# Must create local aclocal dir or aclocal fails
+    $ACLOCAL_LOCALDIR="$ENV{DSTROOT}$prefix/share/aclocal";
+    system "mkdir -p $ACLOCAL_LOCALDIR";
+        
+# The following is required to make aclocal find our .m4 macros
+    $ENV{ACLOCAL}="aclocal -I $ACLOCAL_LOCALDIR -I $prefix/share/aclocal";
+    $ENV{LIBTOOLIZE}="/usr/bin/glibtoolize";
+        
     print "Install phase: \n";
     print "SRCROOT = $ENV{SRCROOT}\n";
     print "DSTROOT = $ENV{DSTROOT}\n";
@@ -72,6 +80,17 @@ if($target eq 'install') {
 	push @font_packages, $_;
     }
 
+    foreach $arch (split(/ /,$ENV{RC_ARCHS})) {
+        $arch_flags_lib .= "-arch $arch ";
+        if($ENV{MACOSFORGE_RELEASE} eq "YES") {
+            $arch_flags_exec .= " -arch $arch " unless $arch =~ /64/;
+        } else {
+            $arch_flags_exec .= " -arch $arch " unless $arch =~ /ppc/;
+        }
+    }
+
+    set_arch_exec();
+
     build("font-util");
     build("encodings");
     sys_print("sed -i.bak 's_^prefix=.*_prefix=$ENV{DSTROOT}$prefix"."_' $ENV{DSTROOT}$prefix/lib/pkgconfig/*.pc");
@@ -81,7 +100,7 @@ if($target eq 'install') {
     sys_print("sed -i.bak 's_^prefix=.*_prefix=$prefix"."_' $ENV{DSTROOT}$prefix/lib/pkgconfig/*.pc");
     sys_print("rm $ENV{DSTROOT}$prefix/lib/pkgconfig/*.bak");
     build("font-alias");
-    unlink("$ENV{DSTROOT}$prefix/bin/ucs2any");
+    make_dsyms();
 }
 
 sub build {
@@ -99,9 +118,10 @@ sub build {
     sys_print("find . -depth 1 -type f -print | xargs -I foo cp -pv foo $ENV{OBJROOT}/$module");
 
     chdir("$ENV{OBJROOT}/$full_path");
+    sys_print("autoreconf -fvi");
 
     print "Configuring...\n";
-    $conf_flags=" --prefix=$prefix --disable-static --disable-dependency-tracking --disable-nls  ";
+    $conf_flags=" --prefix=$prefix --disable-static --disable-dependency-tracking --disable-nls  --mandir=$prefix/share/man ";
 
     $conf_flags_path=$ENV{OBJROOT}."/$module/conf_flags";
     $post_config_path=$ENV{OBJROOT}."/$module/post-config";
@@ -115,6 +135,7 @@ sub build {
     if(-e $post_config_path) {
 	sys_print("cd .. && $post_config_path");
     }
+    sys_print("make -j".`sysctl -n hw.activecpu`);
     sys_print("make install");
     chdir('../..');
 }
@@ -128,6 +149,16 @@ sub get_workdir {
 	}
     }
     die "Unable to determine workdir";
+}
+
+sub set_arch_exec {
+    $ENV{CFLAGS}="-I$ENV{DSTROOT}$prefix/include -D__DEBUG__ -ggdb3 -Os -pipe $arch_flags_exec -D_FORTIFY_SOURCE=2 -Wall -Wformat-security";
+    $ENV{LDFLAGS}="-pipe $arch_flags_exec";
+}
+
+sub set_arch_lib {
+    $ENV{CFLAGS}="-I$ENV{DSTROOT}$prefix/include -D__DEBUG__ -ggdb3 -Os -pipe $arch_flags_lib -D_FORTIFY_SOURCE=2 -Wall -Wformat-security";
+    $ENV{LDFLAGS}="-pipe $arch_flags_lib";
 }
 
 sub sys_print {
@@ -144,5 +175,19 @@ sub sys_print_nodie {
     system $command;
     $retval=$? >> 8;
     print "returned code $retval\n" if $retval;
+}
+
+sub make_dsyms {
+    open(FIND,"find $ENV{DSTROOT} -type f -exec file {} +|");
+    while(<FIND>) {
+	if(/(.*): .*Mach-O/) {
+	    $basename=$1;
+	    $fullpath=$1;
+	    $basename =~ s/\/.*\///;
+	    sys_print_nodie("dsymutil --out=$ENV{SYMROOT}/$basename.dSYM $fullpath");
+	    sys_print_nodie("strip -S $fullpath");
+	}
+    }
+    close FIND;
 }
 
